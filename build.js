@@ -14,17 +14,20 @@ const CONFIG = {
   packageJsonPath: './package.json',
 
   modules: {
-    frontend: true,
+    frontend: false,
     backend: true
   },
 
   backendSettings: {
     concatenate: true,
-    outFile: 'Code.js',
+    outFile: 'SpreadsheetDB.js',
     minify: true,
     priorityOrder: [
-      'config.js',
-      'utils/logger.js'
+      'utils.js',
+      'RowContext.js',
+      'TableContext.js',
+      'Database.js',
+      'Init.js'
     ]
   }
 };
