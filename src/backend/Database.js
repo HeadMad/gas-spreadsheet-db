@@ -165,10 +165,10 @@ class Database {
    */
   notifyModification(sheet) {
     if (!this.txSessionCreated) return;
-    
+
     const id = sheet.getSheetId();
     if (this.txSessionCreated.has(id) || this.txSessionBackups.has(id)) return;
-    
+
     const sheetName = sheet.getName();
     const backupSheet = sheet.copyTo(this.ss);
     backupSheet.setName(`_TX_BKP_${Date.now()}_${sheetName}`);
@@ -268,7 +268,7 @@ class Database {
       callback(this);
 
       // COMMIT: Delete temporary backups
-      for (const {backup} of this.txSessionBackups.values()) {
+      for (const { backup } of this.txSessionBackups.values()) {
         try { this.ss.deleteSheet(backup); } catch (e) { }
       }
 
@@ -289,16 +289,21 @@ class Database {
       }
 
       // B. Restore modified tables from backups
-      for (const [id, {backup, originalName}] of this.txSessionBackups.entries()) {
-        try {
-          const table = this._tables.get(id);
-          if (table) {
+      for (const [id, { backup, originalName }] of this.txSessionBackups.entries()) {
+        const table = this._tables.get(id);
+        if (table) {
+          try {
             this.ss.deleteSheet(table.sheet);
             backup.setName(originalName);
             backup.showSheet();
             table._updateSheet(backup, originalName);
-          }
-        } catch (e) { }
+
+            // ВАЖНО! Обновляем ключ в Map
+            this._tables.delete(id); // удаляем старый ID
+            this._tables.set(backup.getSheetId(), table); // добавляем новый ID
+
+          } catch (e) { }
+        }
       }
 
       // C. Restore focus to original sheet
