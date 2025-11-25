@@ -1,106 +1,215 @@
+/**
+ * TableContext class representing a single table (sheet) in the database.
+ * Provides methods for CRUD operations, iteration, and metadata management.
+ * Instances are cached by the Database class and reused across calls.
+ */
 class TableContext {
   /**
    * Creates a new TableContext instance.
-   * @param {GoogleAppsScript.Spreadsheet.Sheet} sheet - The associated Google Spreadsheet sheet.
-   * @param {Database} dbReference - The associated Database instance.
+   * Note: Typically created internally by Database.getTable() or Database.createTable().
+   * @param {GoogleAppsScript.Spreadsheet.Sheet} sheet - The underlying Google Spreadsheet sheet.
+   * @param {Database} dbReference - Reference to the parent Database instance.
    */
   constructor(sheet, dbReference) {
-    this.sheet = sheet;
     this.db = dbReference;
+    this._invalid = false;
+    this._updateSheet(sheet);
+  }
+
+  /**
+   * Returns the underlying Sheet object.
+   * @return {GoogleAppsScript.Spreadsheet.Sheet} The sheet instance.
+   * @throws {Error} If the TableContext has been invalidated (e.g., after table deletion or rollback).
+   */
+  get sheet() {
+    if (this._invalid) {
+      throw new Error(
+        `TableContext for "${this._name}" is no longer valid. ` +
+        `Get a fresh reference: db.getTable("${this._name}")`
+      );
+    }
+    return this._sheet;
+  }
+
+  /**
+   * Returns the name of the table.
+   * @return {string} The table name.
+   */
+  get name() {
+    return this._name;
+  }
+
+  /**
+   * Internal method to update the sheet reference and reinitialize headers.
+   * Used during transaction rollback to point to the restored backup sheet.
+   * @private
+   * @param {GoogleAppsScript.Spreadsheet.Sheet} sheet - The new sheet instance.
+   * @param {string} [name] - Optional name override (defaults to sheet.getName()).
+   */
+  _updateSheet(sheet, name) {
+    this._sheet = sheet;
+    this._name = name ?? sheet.getName();
     this._initHeaders();
   }
 
   /**
-   * Notifies the database that the table has been modified.
+   * Internal method to mark this TableContext as invalid.
+   * Called when the table is deleted or the context should no longer be used.
+   * Releases all references to allow garbage collection.
+   * @private
    */
-  _touch() { if (this.db) this.db.notifyModification(this.sheet); }
+  _markAsInvalid() {
+    if (this._invalid) return;
+    
+    this._invalid = true;
+    this._sheet = null;
+    this.db = null;
+    this.headerValues = null;
+    this.columnMap = null;
+  }
 
   /**
-   * Initializes the table headers.
-   * 
-   * This method reads the values from the first row of the table and
-   * stores them in the `headerValues` property. It also creates a
-   * column map from the header values to their respective indices
-   * and stores it in the `columnMap` property.
+   * Internal method to notify the database that the table has been modified.
+   * Triggers backup creation if within an active transaction.
+   * @private
+   */
+  _touch() { 
+    if (this.db) this.db.notifyModification(this._sheet); 
+  }
+
+  /**
+   * Internal method to initialize or refresh the table headers.
+   * Reads the first row and builds a column name → index mapping.
+   * @private
    */
   _initHeaders() {
-    const lastCol = this.sheet.getLastColumn();
-    this.headerValues = lastCol > 0 ? this.sheet.getRange(1, 1, 1, lastCol).getValues()[0] : [];
+    const lastCol = this._sheet.getLastColumn();
+    this.headerValues = lastCol > 0 ? this._sheet.getRange(1, 1, 1, lastCol).getValues()[0] : [];
     this.columnMap = this.headerValues.reduce((acc, name, i) => { acc[name] = i; return acc; }, {});
   }
 
-
   /**
-   * Returns the columns of the table as an array of strings.
-   * @return {Array<string>} The columns of the table.
+   * Returns a copy of the table's column names.
+   * @return {string[]} Array of column names from the header row.
+   * @example
+   * const columns = table.getColumns(); // ['id', 'name', 'email']
    */
   getColumns() {
     return [...this.headerValues];
   }
 
   /**
-   * Sets the columns of the table.
-   * @param {Array<string>} columns - The new columns of the table.
-   * @return {TableContext} The TableContext instance.
+   * Sets the table columns (replaces the header row).
+   * The header row is automatically formatted with bold font and frozen.
+   * @param {string[]} columns - Array of column names.
+   * @return {TableContext} This instance for method chaining.
+   * @throws {Error} If columns is not an array.
+   * @example
+   * table.setColumns(['id', 'name', 'email', 'createdAt']);
    */
   setColumns(columns) {
     if (!Array.isArray(columns)) throw new Error("Columns must be an array of strings");
     this._touch();
-    this.sheet.getRange(1, 1, 1, columns.length).setValues([columns]).setFontWeight('bold');
-    this.sheet.setFrozenRows(1);
+    this._sheet.getRange(1, 1, 1, columns.length).setValues([columns]).setFontWeight('bold');
+    this._sheet.setFrozenRows(1);
     this._initHeaders();
     return this;
   }
 
   /**
-   * Returns the number of rows in the table.
-   * @return {number} The number of rows in the table.
+   * Returns the number of data rows in the table (excluding the header row).
+   * @return {number} The count of rows.
    */
-  get count() { return Math.max(0, this.sheet.getLastRow() - 1); }
+  get count() { 
+    return Math.max(0, this._sheet.getLastRow() - 1); 
+  }
 
   /**
-   * Returns the metadata of the table.
-   * @return {Metadata} The metadata of the table.
+   * Returns a proxy object for managing table-level metadata.
+   * Metadata is stored in Developer Metadata and persisted automatically.
+   * @return {Proxy} A proxy object for reading/writing metadata. Call `.save()` to persist changes.
+   * @example
+   * const meta = table.getMetadata();
+   * meta.lastSync = new Date().toISOString();
+   * meta.save();
    */
-  getMetadata() { return Utils.createMetadataProxy(this.sheet); }
+  getMetadata() { 
+    return Utils.createMetadataProxy(this._sheet); 
+  }
 
   /**
-   * Sets the name of the table.
-   * @param {string} name - The new name of the table.
-   * @returns {TableContext} The TableContext instance.
+   * Sets the name of the table (renames the sheet).
+   * @param {string} name - The new table name.
+   * @return {TableContext} This instance for method chaining.
+   * @example
+   * table.setName('users_v2');
    */
   setName(name) {
     this._touch();
-    this.sheet.setName(name);
+    this._sheet.setName(name);
+    this._name = name;
     return this;
   }
 
-
   /**
-   * Calls the given handler for each row in the table.
-   * @param {function} handler - The function to call for each row. It takes
-   *  three arguments: the row object, the index of the row, and a
-   *  function to stop the iteration.
-   * @param {object} [options] - Optional parameters:
-   *   - `limit`: The maximum number of rows to process. Defaults to 0 (no limit).
-   *   - `offset`: The starting position of the iteration. Defaults to 0.
-   *   - `reverse`: Whether to iterate in reverse order. Defaults to false.
-   *   - `batchSize`: The number of rows to process in each iteration. Defaults to 100.
-   * @return {any} The result of the handler function if it stopped the iteration.
+   * Iterates over table rows in batches, calling the handler for each row.
+   * Supports filtering, pagination, reverse iteration, and early stopping.
+   * Automatically handles updates (dirty tracking) and deletions (batch deletion).
+   * 
+   * @param {function(BatchRowContext, number, function): void} handler - Callback receiving:
+   *   - row: BatchRowContext with column name access (e.g., row.name, row.age)
+   *   - index: 1-based row number in the sheet
+   *   - stop: Function to stop iteration early and return a value
+   * @param {Object} [options] - Iteration options.
+   * @param {number} [options.limit=0] - Maximum number of rows to process (0 = no limit).
+   * @param {number} [options.offset=0] - Number of rows to skip from start/end (supports negative values).
+   * @param {boolean} [options.reverse=false] - Whether to iterate in reverse order (bottom to top).
+   * @param {number} [options.batchSize=100] - Number of rows to fetch per API call (performance tuning).
+   * @return {*} The value passed to stop(), or undefined if iteration completed normally.
+   * 
+   * @example
+   * // Update all adult users
+   * table.each((row) => {
+   *   if (row.age >= 18) {
+   *     row.status = 'adult';
+   *   }
+   * });
+   * 
+   * @example
+   * // Find first user named 'Alice'
+   * const alice = table.each((row, index, stop) => {
+   *   if (row.name === 'Alice') {
+   *     stop(row.toJSON());
+   *   }
+   * });
+   * 
+   * @example
+   * // Delete inactive users (reverse to avoid index shifting issues)
+   * table.each((row) => {
+   *   if (!row.isActive) {
+   *     row.remove();
+   *   }
+   * }, { reverse: true });
+   * 
+   * @example
+   * // Process last 10 rows
+   * table.each((row) => {
+   *   console.log(row.name);
+   * }, { limit: 10, reverse: true });
    */
   each(handler, { limit = 0, offset = 0, reverse = false, batchSize = 100 } = {}) {
     const minRow = 2;
-    const lastRow = this.sheet.getLastRow();
+    const lastRow = this._sheet.getLastRow();
 
-    // 1. Вычисляем стартовую позицию
+    // Calculate starting position
     let cursor = reverse
       ? (offset >= 0 ? lastRow - offset : minRow - offset - 1)
       : (offset >= 0 ? minRow + offset : lastRow + offset + 1);
 
-    // 2. Проверка границ
+    // Boundary check
     if (cursor < minRow || cursor > lastRow) return undefined;
 
-    // 3. Расчет количества
+    // Calculate total rows to process
     const maxAvailable = reverse ? (cursor - minRow + 1) : (lastRow - cursor + 1);
     const totalToProcess = (limit > 0 && limit < maxAvailable) ? limit : maxAvailable;
 
@@ -108,12 +217,12 @@ class TableContext {
     const rowsToDelete = [];
     const stop = (val) => { stopped = true; result = val; };
 
-    // 4. Цикл по батчам
+    // Batch processing loop
     while (!stopped && processed < totalToProcess) {
       const count = Math.min(batchSize, totalToProcess - processed);
       const rangeTop = reverse ? (cursor - count + 1) : cursor;
 
-      const range = this.sheet.getRange(rangeTop, 1, count, this.headerValues.length);
+      const range = this._sheet.getRange(rangeTop, 1, count, this.headerValues.length);
       const values = range.getValues();
       let dirty = false;
 
@@ -134,10 +243,11 @@ class TableContext {
       cursor += reverse ? -count : count;
     }
 
+    // Batch delete marked rows
     if (rowsToDelete.length) {
       this._touch();
       Utils.groupConsecutive(rowsToDelete).forEach(g =>
-        this.sheet.deleteRows(g[g.length - 1], g.length)
+        this._sheet.deleteRows(g[g.length - 1], g.length)
       );
     }
 
@@ -145,12 +255,26 @@ class TableContext {
   }
 
   /**
-   * Inserts an array of rows into the table.
-   * @param {Array} rows - Array of rows to insert. Each row can be either an array or an object.
-   * If the row is an array, it will be inserted as is.
-   * If the row is an object, it will be inserted with keys matching the column names.
-   * If a key is not present in the object, it will be inserted as an empty string.
-   * @returns {TableContext} The TableContext instance.
+   * Inserts multiple rows into the table at the end.
+   * Rows can be arrays (positional values) or objects (keyed by column names).
+   * Missing object keys are filled with empty strings.
+   * 
+   * @param {Array<Array|Object>} rows - Array of rows to insert.
+   * @return {TableContext} This instance for method chaining.
+   * 
+   * @example
+   * // Insert as objects
+   * table.insertRows([
+   *   { name: 'Alice', age: 30 },
+   *   { name: 'Bob', age: 25 }
+   * ]);
+   * 
+   * @example
+   * // Insert as arrays (must match column order)
+   * table.insertRows([
+   *   [1, 'Alice', 30],
+   *   [2, 'Bob', 25]
+   * ]);
    */
   insertRows(rows) {
     if (!Array.isArray(rows) || !rows.length) return this;
@@ -164,16 +288,22 @@ class TableContext {
       return [];
     });
 
-    const startRow = this.sheet.getLastRow() + 1;
-    this.sheet.getRange(startRow, 1, grid.length, this.headerValues.length).setValues(grid);
+    const startRow = this._sheet.getLastRow() + 1;
+    this._sheet.getRange(startRow, 1, grid.length, this.headerValues.length).setValues(grid);
     return this;
   }
 
   /**
-   * Inserts a row into the table.
-   * @param {Object} row - The row to insert. Each key in the object should match a column name.
-   * If the key is not present in the object, it will be inserted as an empty string.
-   * @returns {TableContext} The TableContext instance.
+   * Inserts a single row into the table at the end.
+   * Convenience method that calls insertRows() internally.
+   * 
+   * @param {Array|Object} row - The row to insert (array or object).
+   * @return {TableContext} This instance for method chaining.
+   * 
+   * @example
+   * table.insertRow({ name: 'Alice', age: 30 });
    */
-  insertRow(row) { return this.insertRows([row]); }
+  insertRow(row) { 
+    return this.insertRows([row]); 
+  }
 }

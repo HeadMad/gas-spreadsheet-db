@@ -27,7 +27,7 @@ const CONFIG = {
       'RowContext.js',
       'TableContext.js',
       'Database.js',
-      'Init.js'
+      'staticMethods.js'
     ]
   }
 };
